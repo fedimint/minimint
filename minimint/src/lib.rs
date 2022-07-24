@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use hbbft::honey_badger::{HoneyBadger, Message};
 use hbbft::NetworkInfo;
+use minimint_api::rand::Rand07Compat;
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
 use tokio::sync::Notify;
@@ -113,11 +114,7 @@ impl MinimintServer {
             cfg.identity,
             cfg.hbbft_sks.inner().clone(),
             cfg.hbbft_pk_set.clone(),
-            cfg.hbbft_sk.inner().clone(),
-            cfg.peers
-                .iter()
-                .map(|(id, peer)| (*id, peer.hbbft_pk))
-                .collect(),
+            cfg.peers.iter().map(|(id, _)| *id),
         );
 
         let hbbft: HoneyBadger<Vec<ConsensusItem>, _> =
@@ -175,7 +172,7 @@ impl MinimintServer {
 
         let step = self
             .hbbft
-            .propose(&proposal.items, rng)
+            .propose(&proposal.items, &mut Rand07Compat(rng))
             .expect("HBBFT propose failed");
 
         for msg in step.messages {
