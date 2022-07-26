@@ -65,7 +65,7 @@ impl MinimintServer {
 
         Self::new_with(
             cfg.clone(),
-            Arc::new(sled::open(&cfg.db_path).unwrap().open_tree("mint").unwrap()),
+            Arc::new(rocksdb::OptimisticTransactionDB::open_default(&cfg.db_path).unwrap()),
             bitcoincore_rpc::bitcoind_gen(cfg.wallet.clone()),
             connector,
         )
