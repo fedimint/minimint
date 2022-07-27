@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
 use crate::net::connect::TlsConfig;
+use async_trait::async_trait;
+use minimint_api::net::peers::AnyPeerConnections;
 use std::path::PathBuf;
 use tokio_rustls::rustls;
 
@@ -60,9 +62,12 @@ pub struct ServerConfigParams {
     pub amount_tiers: Vec<minimint_api::Amount>,
 }
 
+#[async_trait(?Send)]
 impl GenerateConfig for ServerConfig {
     type Params = ServerConfigParams;
     type ClientConfig = ClientConfig;
+    type ConfigMessage = ();
+    type ConfigError = ();
 
     fn trusted_dealer_gen(
         peers: &[PeerId],
@@ -149,6 +154,17 @@ impl GenerateConfig for ServerConfig {
         };
 
         (server_config, client_config)
+    }
+
+    async fn distributed_gen(
+        _connections: AnyPeerConnections<Self::ConfigMessage>,
+        _our_id: &PeerId,
+        _peers: &[PeerId],
+        _max_evil: usize,
+        _params: &Self::Params,
+        _rng: impl RngCore + CryptoRng,
+    ) -> Result<(Self, Self::ClientConfig), Self::ConfigError> {
+        todo!()
     }
 }
 
