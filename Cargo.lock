@@ -547,6 +547,7 @@ dependencies = [
  "minimint-api",
  "minimint-core",
  "mint-client",
+ "rand 0.6.5",
  "reqwest",
  "serde",
  "serde_json",
