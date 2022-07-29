@@ -32,7 +32,10 @@ use tracing_subscriber::EnvFilter;
 use fake::{FakeBitcoinTest, FakeLightningTest};
 use ln_gateway::ln::LnRpc;
 use ln_gateway::LnGateway;
-use minimint::config::ServerConfigParams;
+use minimint::config::{
+    gen_connections, gen_local_network_config, gen_tls_configs, RemoteServerConfig,
+    ServerConfigParams,
+};
 use minimint::config::{ClientConfig, FeeConsensus, ServerConfig};
 use minimint::consensus::{ConsensusItem, ConsensusOutcome, ConsensusProposal};
 use minimint::net::connect::mock::MockNetwork;
@@ -46,6 +49,8 @@ use minimint_api::db::mem_impl::MemDatabase;
 use minimint_api::db::Database;
 
 use minimint_api::{Amount, FederationModule, OutPoint, PeerId};
+
+use minimint_mint::config::MintConfig;
 use minimint_wallet::bitcoind::BitcoindRpc;
 use minimint_wallet::config::WalletConfig;
 use minimint_wallet::db::UTXOKey;
@@ -91,7 +96,7 @@ pub async fn fixtures(
     GatewayTest,
     Box<dyn LightningTest>,
 ) {
-    let base_port = BASE_PORT.fetch_add(num_peers * 2, Ordering::Relaxed);
+    let base_port = BASE_PORT.fetch_add(num_peers * 5, Ordering::Relaxed);
 
     // in case we need to output logs using 'cargo test -- --nocapture'
     if base_port == 4000 {
@@ -106,19 +111,69 @@ pub async fn fixtures(
     let params = ServerConfigParams {
         hbbft_base_port: base_port,
         api_base_port: base_port + num_peers,
+        keygen_base_port: base_port + num_peers * 2,
+        wallet_base_port: base_port + num_peers * 3,
+        lightning_base_port: base_port + num_peers * 4,
         amount_tiers: amount_tiers.to_vec(),
     };
     let peers = (0..num_peers as u16).map(PeerId::from).collect::<Vec<_>>();
 
     let max_evil = hbbft::util::max_faulty(peers.len());
-    let (server_config, client_config) =
-        ServerConfig::trusted_dealer_gen(&peers, max_evil, &params, OsRng::new().unwrap());
+    // let (server_config, client_config) =
+    //     ServerConfig::trusted_dealer_gen(&peers, max_evil, &(params.clone(), None), OsRng::new().unwrap());
+    // let server_config: Vec<ServerConfig> = server_config.values().cloned().collect();
+
+    // FIXME distributed gen should run only during "real" tests
+    let tls = gen_tls_configs(&peers);
+
+    let (msc, mcc) =
+        MintConfig::trusted_dealer_gen(&peers, max_evil, params.amount_tiers.as_ref(), &mut rng());
+
+    let configs = join_all(peers.iter().map(|id| {
+        let (msc, mcc) = (msc.clone(), mcc.clone());
+        let peers = peers.clone();
+        let tls = tls.get(id).unwrap().clone();
+        let params = params.clone();
+
+        async move {
+            let hbbft = gen_local_network_config(params.hbbft_base_port, id, &peers);
+            let wallet = gen_connections(params.wallet_base_port, id, &peers, tls.clone()).await;
+            let lightning =
+                gen_connections(params.lightning_base_port, id, &peers, tls.clone()).await;
+            let mut keygen =
+                gen_connections(params.keygen_base_port, id, &peers, tls.clone()).await;
+
+            let remote_cfg = RemoteServerConfig {
+                tls,
+                hbbft,
+                wallet,
+                lightning,
+                configs: (msc[id].clone(), mcc.clone()),
+            };
+            ServerConfig::distributed_gen(
+                &mut keygen,
+                id,
+                &peers,
+                max_evil,
+                &mut (params, Some(remote_cfg)),
+                OsRng::new().unwrap(),
+            )
+            .await
+        }
+    }))
+    .await;
+    let client_config = configs.first().cloned().unwrap().unwrap().1;
+    let server_config: Vec<ServerConfig> = configs
+        .clone()
+        .into_iter()
+        .map(|cfg| cfg.unwrap().0)
+        .collect();
 
     match env::var("MINIMINT_TEST_REAL") {
         Ok(s) if s == "1" => {
             info!("Testing with REAL Bitcoin and Lightning services");
             let dir = env::var("FM_TEST_DIR").expect("Must have test dir defined for real tests");
-            let wallet_config = server_config.iter().last().unwrap().1.wallet.clone();
+            let wallet_config = server_config.iter().last().unwrap().wallet.clone();
             let bitcoin_rpc = bitcoincore_rpc::bitcoind_gen(wallet_config.clone());
             let bitcoin = RealBitcoinTest::new(wallet_config);
             let socket_gateway = PathBuf::from(dir.clone()).join("ln1/regtest/lightning-rpc");
@@ -131,7 +186,7 @@ pub async fn fixtures(
                     .expect("connect to ln_socket"),
             );
             let connect_gen = |cfg: &ServerConfig| TlsTcpConnector::new(cfg.tls_config()).to_any();
-            let fed = FederationTest::new(server_config.clone(), &bitcoin_rpc, &connect_gen).await;
+            let fed = FederationTest::new(&server_config, &bitcoin_rpc, &connect_gen).await;
             let gateway = GatewayTest::new(
                 Box::new(lightning_rpc),
                 client_config.clone(),
@@ -155,7 +210,7 @@ pub async fn fixtures(
             let net = MockNetwork::new();
             let net_ref = &net;
             let connect_gen = move |cfg: &ServerConfig| net_ref.connector(cfg.identity).to_any();
-            let fed = FederationTest::new(server_config.clone(), &bitcoin_rpc, &connect_gen).await;
+            let fed = FederationTest::new(&server_config, &bitcoin_rpc, &connect_gen).await;
             let gateway = GatewayTest::new(
                 Box::new(lightning.clone()),
                 client_config.clone(),
@@ -615,11 +670,11 @@ impl FederationTest {
     }
 
     async fn new(
-        server_config: BTreeMap<PeerId, ServerConfig>,
+        server_config: &[ServerConfig],
         bitcoin_gen: &impl Fn() -> Box<dyn BitcoindRpc>,
         connect_gen: &impl Fn(&ServerConfig) -> PeerConnector<Message<PeerId>>,
     ) -> Self {
-        let servers = join_all(server_config.values().map(|cfg| async move {
+        let servers = join_all(server_config.iter().map(|cfg| async move {
             let bitcoin_rpc = bitcoin_gen();
             let database = Arc::new(MemDatabase::new());
 
@@ -647,8 +702,7 @@ impl FederationTest {
         }))
         .await;
 
-        // Consumes the empty epoch 0 outcome from all servers
-        let server_config = server_config.iter().last().unwrap().1.clone();
+        let server_config = server_config.iter().last().unwrap().clone();
         let wallet = server_config.wallet;
         let last_consensus = Rc::new(RefCell::new(Batch {
             epoch: 0,
