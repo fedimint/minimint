@@ -58,6 +58,17 @@ impl PendingResponse {
     }
 }
 
+#[derive(Serialize)]
+pub struct PegInAddressResponse {
+    pegin_address: bitcoin::Address,
+}
+
+impl PegInAddressResponse {
+    pub fn new(pegin_address: bitcoin::Address) -> Self {
+        Self { pegin_address }
+    }
+}
+
 /// Holds a e-cash tier (msat by convention) and a quantity of coins
 ///
 /// e.g { tier: 1000, quantity: 10 } means 10x coins worth 1000msat each
